@@ -84,8 +84,8 @@ metal-ai-skill/
 │   │   ├── main.swift                            # Headless particle simulation
 │   │   ├── Shaders.metal                         # 5 shader bugs + 5 host bugs
 │   │   └── build_and_run.sh
-│   └── visual-demo/                              # 5-bug rendering demo
-│       ├── main.swift                            # Headless triangle renderer → PNG
+│   └── visual-demo/                              # 4-bug rendering demo
+│       ├── main.swift                            # Windowed cube renderer with geometry bug
 │       ├── Shaders.metal                         # 3 shader bugs (BGR, Y-flip, alpha=0)
 │       └── build_and_run.sh
 ├── CLAUDE.md                                     # Project context for Claude Code
@@ -110,7 +110,7 @@ metal-ai-skill/
 | **Validation** | API validation flag | API + Shader validation layers |
 | **Performance HUD** | N/A | Built-in MTL_HUD_ENABLED |
 
-The fundamental difference: RenderDoc gives you full post-mortem capture inspection from CLI. Metal's tooling splits between CLI (profiling, validation, shader compilation, buffer data readback) and Xcode GUI (draw call stepping, shader debugging, pixel history). This skill maximizes what's available from CLI, including the label injection technique for reading buffer/texture data directly from `.gputrace` captures.
+The fundamental difference: RenderDoc gives you full post-mortem capture inspection from CLI. Metal's tooling splits between CLI (profiling, validation, shader compilation) and Xcode GUI (draw call stepping, shader debugging, pixel history). This skill uses an autonomous debugging workflow that gathers signal from multiple sources in parallel (screenshots, .gputrace, shader compilation, source code) and falls back gracefully when buffer data isn't available from programmatic captures.
 
 ## Examples
 
@@ -156,9 +156,11 @@ python3 parse_gputrace.py capture.gputrace --buffer "Color Output" --layout floa
 
 ## Visual Demo
 
-The `examples/visual-demo/` contains a broken Metal renderer with **5 intentional bugs** that produce visibly wrong output. It demonstrates how Claude Code diagnoses rendering issues from `.gputrace` buffer analysis and shader review.
+[Watch the demo on YouTube](https://www.youtube.com/watch?v=ov_v3b5gNCE)
 
-**Before (buggy)** — lopsided, wrong colors, transparent on black:
+The `examples/visual-demo/` contains a broken Metal cube renderer with **4 intentional bugs** that produce visibly wrong output. It demonstrates Claude Code's autonomous debugging workflow — screenshot, .gputrace capture, shader compilation, source code analysis, and fix/verify loop.
+
+**Before (buggy)** — distorted geometry, flipped, wrong colors:
 
 ![Before — buggy output](examples/visual-demo/before.png)
 
@@ -166,27 +168,24 @@ The `examples/visual-demo/` contains a broken Metal renderer with **5 intentiona
 
 ```bash
 cd examples/visual-demo
-./build_and_run.sh --capture     # Render + capture .gputrace
+./build_and_run.sh --screenshot  # Render + save output.png
 
-# Claude analyzes the capture:
-python3 ../../parse_gputrace.py capture.gputrace
-# Resources:
-#   MTLTexture-8-0   → Render Target
-# Shader Functions: vertex_main, fragment_main
+# Claude gathers signal in parallel:
+#   A. Reads output.png — sees distorted, wrong-colored cube
+#   B. Captures .gputrace — lists resources and shader functions
+#   C. Compiles shaders with -Weverything
+#   D. Reads source code (.metal + Swift)
 
-# Claude reads Shaders.metal — spots 3 bugs:
-#   Bug 1: R/B channels swapped (color.b assigned to red)
-#   Bug 2: Y axis flipped (position.y * -1.0)
-#   Bug 3: Alpha multiplied by 0.0 (transparent)
+# Claude diagnoses 4 bugs:
+#   Bug 1: Front face vertices collapsed to (0,0,s) instead of (s,s,s)
+#   Bug 2: Y axis flipped after MVP (out.position.y *= -1.0)
+#   Bug 3: R/B channels swapped in fragment shader
+#   Bug 4: Alpha multiplied by 0.0 (transparent)
 
-# Claude reads main.swift — spots 2 bugs:
-#   Bug 4: Top vertex X=0.9 instead of 0.0 (lopsided)
-#   Bug 5: Clear color is black instead of dark gray
-
-# Claude fixes all 5, rebuilds, verifies output.png is correct
+# Claude fixes all 4, rebuilds, verifies output.png is correct
 ```
 
-**After (fixed)** — centered triangle with R/G/B vertices on dark gray:
+**After (fixed)** — properly oriented cube with correct face colors:
 
 ![After — fixed output](examples/visual-demo/after.png)
 
