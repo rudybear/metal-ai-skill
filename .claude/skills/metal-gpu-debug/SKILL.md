@@ -1,0 +1,985 @@
+---
+name: metal-gpu-debug
+description: >
+  Metal GPU debugging and profiling via xctrace and Apple's Metal toolchain. Use this skill when the user mentions:
+  Metal debugging, .gputrace files, Metal shaders, Metal pipeline state, Metal performance,
+  Metal System Trace, Apple GPU profiling, Metal validation, shader compilation errors,
+  MSL (Metal Shading Language), .metallib files, .air files, Metal render pass,
+  Metal command buffer, Metal encoder, MTLDevice, MTLTexture, Metal Performance HUD,
+  GPU counters on Apple Silicon, Metal frame capture, Metal API validation,
+  Metal shader validation, xcrun metal, xctrace, Instruments GPU trace,
+  MoltenVK debugging, Vulkan on macOS, Apple Silicon GPU, Metal 3, Metal 4,
+  Metal compute kernel, MetalFX, Metal Performance Shaders, Metal ray tracing,
+  "profile my Metal app", "why is my shader slow", "capture a Metal frame",
+  "Metal validation error", "debug Metal on Mac", "GPU trace on macOS".
+  DO NOT use for: RenderDoc, Vulkan on Windows/Linux, D3D debugging, PIX,
+  Nsight, CSS rendering, React rendering, server-side rendering, HTML layout,
+  browser DevTools, web performance.
+---
+
+# Metal GPU Debugging & Profiling Skill
+
+## Overview
+
+This skill enables Metal GPU profiling, debugging, and shader analysis on macOS using Apple's command-line toolchain. The primary tools are:
+
+- **`xctrace`** — CLI for Instruments; records Metal System Traces, exports GPU data as XML
+- **`xcrun metal`** — Metal shader compiler toolchain (compile, archive, link)
+- **Metal environment variables** — validation layers, Performance HUD, programmatic capture
+- **`log`** — macOS unified logging for Metal HUD and validation output
+- **`parse_gputrace.py`** — CLI tool for extracting buffer/texture data from `.gputrace` captures
+
+### Prerequisites
+
+Before any Metal debugging, verify the environment:
+
+```bash
+# Check Xcode is installed (full Xcode, not just Command Line Tools)
+xcode-select -p
+# Expected: /Applications/Xcode.app/Contents/Developer
+
+# Check xctrace is available
+xcrun xctrace version
+
+# Check Metal compiler
+xcrun -sdk macosx metal --version
+
+# List available GPU devices (requires a Swift/ObjC helper or Python)
+system_profiler SPDisplaysDataType | grep -A5 "Chipset\|Metal"
+```
+
+**IMPORTANT**: `xctrace` and Metal tools require **full Xcode**, not just Command Line Tools.
+
+## 1. Automated Session Lifecycle
+
+Every Metal debugging session follows a strict pipeline: **Doctor → Record → Export → Parse → Analyze → Report → Cleanup**. Claude should execute this pipeline autonomously, not just suggest commands.
+
+### Step 0: Doctor — Verify environment
+
+**Run this FIRST before any debugging session.** If any check fails, stop and tell the user what's missing.
+
+```bash
+# Create working directories
+mkdir -p ./traces/analysis
+
+# Verify toolchain
+xcode-select -p                          # Must show Xcode.app path, NOT CommandLineTools
+xcrun xctrace version                    # Must succeed
+xcrun -sdk macosx metal --version        # Must succeed
+system_profiler SPDisplaysDataType | grep -i "metal\|chipset"  # GPU info
+
+# For iOS: check connected devices
+xcrun xctrace list devices 2>/dev/null   # List all available targets
+
+# Check parse helper is available
+python3 -c "import xml.etree.ElementTree" 2>/dev/null && echo "XML parser OK"
+```
+
+**If `xcode-select -p` returns `/Library/Developer/CommandLineTools`**, tell the user:
+```
+Xcode Command Line Tools is installed but full Xcode is required.
+Install from: https://developer.apple.com/xcode/
+Then run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+```
+
+### Step 1: Record — Capture a Metal System Trace
+
+Choose the right recording mode based on the user's request:
+
+```bash
+# MODE A: Launch and profile (most common)
+xcrun xctrace record \
+  --template 'Metal System Trace' \
+  --time-limit 10s \
+  --no-prompt \
+  --output ./traces/capture.trace \
+  --launch -- /path/to/app [args...]
+
+# MODE B: Attach to running process
+xcrun xctrace record \
+  --template 'Metal System Trace' \
+  --attach <PID_OR_NAME> \
+  --time-limit 10s \
+  --no-prompt \
+  --output ./traces/capture.trace
+
+# MODE C: With validation enabled (for debugging errors)
+xcrun xctrace record \
+  --template 'Metal System Trace' \
+  --env MTL_DEBUG_LAYER=1 \
+  --env MTL_SHADER_VALIDATION=1 \
+  --time-limit 10s \
+  --no-prompt \
+  --output ./traces/capture.trace \
+  --launch -- /path/to/app
+
+# MODE D: iOS device (over USB)
+xcrun xctrace record \
+  --template 'Metal System Trace' \
+  --device '<DEVICE_NAME_OR_UDID>' \
+  --attach <APP_NAME> \
+  --time-limit 10s \
+  --no-prompt \
+  --output ./traces/capture.trace
+```
+
+**Decision guide:**
+- User says "profile my app" → Mode A
+- User says "it's already running" → Mode B
+- User says "I'm getting errors" or "something is wrong" → Mode C
+- User mentions iPhone/iPad → Mode D
+
+**IMPORTANT**: Always use `--no-prompt` for automation. Always use `--time-limit` (default 10s, adjust if user specifies). Always use `--output` with explicit path.
+
+### Step 2: Export — Extract structured data from trace
+
+First discover what's in the trace, then export the relevant tables.
+
+```bash
+# 2a. Get table of contents (ALWAYS do this first)
+xcrun xctrace export --input ./traces/capture.trace --toc \
+  > ./traces/analysis/toc.xml
+
+# 2b. Show available schemas to decide what to export
+grep 'schema=' ./traces/analysis/toc.xml
+
+# 2c. Export Metal GPU driver events (primary data source)
+xcrun xctrace export --input ./traces/capture.trace \
+  --output ./traces/analysis/gpu_events.xml \
+  --xpath '/trace-toc/run[@number="1"]/data/table[@schema="metal-driver-event-intervals"]'
+
+# 2d. Export GPU hardware counters (if available — Apple Silicon)
+xcrun xctrace export --input ./traces/capture.trace \
+  --output ./traces/analysis/gpu_counters.xml \
+  --xpath '/trace-toc/run[@number="1"]/data/table[@schema="gpu-counter-intervals"]' \
+  2>/dev/null || echo "No GPU counter data in this trace"
+
+# 2e. Export Metal GPU execution intervals (if available)
+xcrun xctrace export --input ./traces/capture.trace \
+  --output ./traces/analysis/gpu_intervals.xml \
+  --xpath '/trace-toc/run[@number="1"]/data/table[@schema="metal-gpu-intervals"]' \
+  2>/dev/null || echo "No GPU interval data in this trace"
+```
+
+**Schema availability varies** by Xcode version, template, and GPU. Always check the TOC first and export what's there. Don't fail if a schema is missing — report what was found.
+
+### Step 3: Parse — Convert XML to structured data
+
+Use the `parse_trace.py` helper (included in this repo) or inline Python to extract actionable data.
+
+```bash
+# Summary of what was captured
+python3 parse_trace.py ./traces/analysis/gpu_events.xml --summary
+
+# Get structured data as JSON
+python3 parse_trace.py ./traces/analysis/gpu_events.xml --format json --limit 50
+
+# Get as TSV for scanning
+python3 parse_trace.py ./traces/analysis/gpu_events.xml --format tsv --limit 30
+
+# If parse_trace.py is not available, use inline Python:
+python3 << 'PARSE_SCRIPT'
+import xml.etree.ElementTree as ET
+import json
+
+tree = ET.parse('./traces/analysis/gpu_events.xml')
+root = tree.getroot()
+
+# Build ref resolution map
+id_map = {}
+for elem in root.iter():
+    eid = elem.get('id')
+    if eid is not None:
+        id_map[eid] = elem
+
+def resolve(elem):
+    ref = elem.get('ref')
+    if ref and ref in id_map:
+        return id_map[ref]
+    return elem
+
+def get_val(elem):
+    r = resolve(elem)
+    return r.get('fmt', r.text or '')
+
+rows = root.findall('.//row')
+print(f"Total events: {len(rows)}")
+
+# Parse first 30 rows into dicts
+parsed = []
+headers = None
+for row in rows[:30]:
+    cols = list(row)
+    if headers is None:
+        headers = [c.tag for c in cols]
+    entry = {headers[i]: get_val(c) for i, c in enumerate(cols)}
+    parsed.append(entry)
+
+print(json.dumps(parsed, indent=2))
+PARSE_SCRIPT
+```
+
+### Step 4: Analyze — Interpret the data
+
+After parsing, Claude should analyze the results and look for:
+
+**Performance profiling:**
+- GPU busy time per frame (>16ms = below 60fps, >8ms = below 120fps)
+- Large wire memory events (excessive per-frame resource allocation)
+- Gaps between GPU submissions (CPU-bound)
+- Long shader execution intervals (complex shaders)
+- Imbalanced encoder durations (one pass dominating)
+
+**Validation errors:**
+- Pattern-match stderr and log output for Metal error codes
+- Classify errors: API misuse vs shader bug vs resource issue
+- Map errors to specific command encoders via labels
+
+**Shader issues:**
+- Compile-time warnings/errors from `xcrun metal`
+- Runtime validation errors from `MTL_SHADER_VALIDATION`
+
+### Step 5: Report — Present findings to user
+
+Structure the report as:
+1. **Environment**: GPU model, macOS version, device (Mac/iOS)
+2. **Summary**: Total events, recording duration, overall health
+3. **Key findings**: Sorted by severity (errors → warnings → info)
+4. **Specific data**: Relevant numbers, event counts, durations
+5. **Recommendations**: Concrete next steps
+
+### Step 6: Cleanup
+
+```bash
+# Remove large trace files when analysis is complete
+# (only if user doesn't need the raw trace)
+rm -rf ./traces/capture.trace
+
+# Keep analysis outputs for reference
+ls -la ./traces/analysis/
+```
+
+### Complete automated workflow example
+
+This is what Claude should execute end-to-end when a user says "profile my Metal app":
+
+```bash
+#!/bin/bash
+set -e
+APP_PATH="$1"
+TRACE_DIR="./traces"
+ANALYSIS_DIR="$TRACE_DIR/analysis"
+
+# Doctor
+mkdir -p "$ANALYSIS_DIR"
+xcode-select -p >/dev/null 2>&1 || { echo "ERROR: Xcode not found"; exit 1; }
+xcrun xctrace version >/dev/null 2>&1 || { echo "ERROR: xctrace not available"; exit 1; }
+
+# Record
+echo "Recording Metal System Trace (10s)..."
+xcrun xctrace record \
+  --template 'Metal System Trace' \
+  --time-limit 10s \
+  --no-prompt \
+  --output "$TRACE_DIR/capture.trace" \
+  --launch -- "$APP_PATH"
+
+# Export TOC
+echo "Exporting trace data..."
+xcrun xctrace export --input "$TRACE_DIR/capture.trace" --toc \
+  > "$ANALYSIS_DIR/toc.xml"
+
+# Export all available Metal tables
+for schema in metal-driver-event-intervals gpu-counter-intervals metal-gpu-intervals; do
+  if grep -q "schema=\"$schema\"" "$ANALYSIS_DIR/toc.xml"; then
+    echo "Exporting $schema..."
+    xcrun xctrace export --input "$TRACE_DIR/capture.trace" \
+      --output "$ANALYSIS_DIR/${schema}.xml" \
+      --xpath "/trace-toc/run[@number=\"1\"]/data/table[@schema=\"$schema\"]"
+  fi
+done
+
+# Parse and summarize
+echo "Analyzing..."
+for xml in "$ANALYSIS_DIR"/*.xml; do
+  [ "$xml" = "$ANALYSIS_DIR/toc.xml" ] && continue
+  echo "=== $(basename "$xml") ==="
+  python3 parse_trace.py "$xml" --summary 2>/dev/null || \
+    python3 -c "
+import xml.etree.ElementTree as ET
+tree = ET.parse('$xml')
+rows = tree.getroot().findall('.//row')
+print(f'  Rows: {len(rows)}')
+"
+done
+
+echo "Done. Analysis files in $ANALYSIS_DIR/"
+```
+
+### Parallel workflows: Validation + Profiling + Logs
+
+Claude can run multiple debugging streams simultaneously for maximum signal:
+
+```bash
+# Record trace with all validation layers AND HUD logging in one shot
+xcrun xctrace record \
+  --template 'Metal System Trace' \
+  --env MTL_DEBUG_LAYER=1 \
+  --env MTL_SHADER_VALIDATION=1 \
+  --env MTL_HUD_ENABLED=1 \
+  --env MTL_HUD_LOGGING_ENABLED=1 \
+  --time-limit 10s \
+  --no-prompt \
+  --output ./traces/full_debug.trace \
+  --launch -- /path/to/app 2> ./traces/analysis/stderr.log &
+
+TRACE_PID=$!
+
+# Simultaneously capture Metal logs from unified log
+log stream --predicate 'subsystem == "com.apple.Metal"' \
+  --timeout 15 > ./traces/analysis/metal_log.txt 2>/dev/null &
+
+LOG_PID=$!
+
+# Wait for trace to finish
+wait $TRACE_PID
+
+# Give log stream a moment then stop it
+sleep 2
+kill $LOG_PID 2>/dev/null
+
+# Now analyze ALL data sources:
+echo "=== Validation Errors (stderr) ==="
+grep -i "error\|warning\|invalid\|fault" ./traces/analysis/stderr.log || echo "None"
+
+echo "=== Metal Log Entries ==="
+wc -l < ./traces/analysis/metal_log.txt
+grep -i "error" ./traces/analysis/metal_log.txt || echo "No errors in log"
+
+echo "=== Trace Data ==="
+xcrun xctrace export --input ./traces/full_debug.trace --toc
+```
+
+### Session state awareness
+
+Unlike RenderDoc's daemon model (open/close), xctrace sessions are **fire-and-forget**: each `record` command runs to completion, and the resulting `.trace` file is a self-contained snapshot. This means:
+
+- **No session to manage** — no open/close, no daemon, no leaked processes
+- **Multiple traces can coexist** — name them meaningfully (before.trace, after.trace)
+- **Traces are immutable** — once recorded, they don't change
+- **Export is idempotent** — re-export the same trace as many times as needed
+- **Cleanup is just file deletion** — `rm` the .trace bundle when done
+
+## 2. iOS Device Support
+
+`xctrace` can profile Metal apps on physical iOS/iPadOS devices over USB or Wi-Fi.
+
+### List connected devices
+
+```bash
+xcrun xctrace list devices
+# Shows: Mac, connected iPhones/iPads, simulators
+```
+
+### Record on iOS device
+
+```bash
+# By device name
+xcrun xctrace record \
+  --template 'Metal System Trace' \
+  --device 'iPhone 15 Pro' \
+  --attach MyApp \
+  --time-limit 10s \
+  --output ios_trace.trace
+
+# By UDID (more reliable)
+xcrun xctrace record \
+  --template 'Metal System Trace' \
+  --device 00008110-XXXXXXXXXXXX \
+  --attach MyApp \
+  --time-limit 10s \
+  --output ios_trace.trace
+
+# Launch app on device (must be installed)
+xcrun xctrace record \
+  --template 'Metal System Trace' \
+  --device 'iPhone 15 Pro' \
+  --time-limit 10s \
+  --output ios_trace.trace \
+  --launch -- com.yourcompany.yourapp
+```
+
+### iOS-specific notes
+
+- Device must be **unlocked** and **trusted** by the Mac
+- App must be installed on device (use Xcode or `ios-deploy`)
+- `--launch` uses **bundle identifier** (not path) on iOS
+- `--attach` uses **process name** or PID
+- Export/parse works identically — the `.trace` format is the same
+- Shader compilation for iOS uses `-sdk iphoneos`:
+  ```bash
+  xcrun -sdk iphoneos metal -c Shader.metal -o Shader.air
+  ```
+- `.gputrace` capture on iOS requires Xcode attached to the device
+
+## 3. Metal System Trace — Record & Export
+
+Metal System Trace is the primary tool for GPU profiling. It captures CPU/GPU timeline, driver events, shader execution, and hardware counters.
+
+### Record a trace
+
+```bash
+# Profile a running app by name
+xcrun xctrace record \
+  --template 'Metal System Trace' \
+  --attach <PID_OR_NAME> \
+  --time-limit 5s \
+  --output trace.trace
+
+# Launch and profile
+xcrun xctrace record \
+  --template 'Metal System Trace' \
+  --time-limit 5s \
+  --output trace.trace \
+  --launch -- /path/to/your/app [args...]
+
+# With environment variables (e.g., enable validation)
+xcrun xctrace record \
+  --template 'Metal System Trace' \
+  --env MTL_DEBUG_LAYER=1 \
+  --env MTL_SHADER_VALIDATION=1 \
+  --time-limit 5s \
+  --output trace.trace \
+  --launch -- /path/to/your/app
+```
+
+Key options:
+- `--time-limit 5s` — auto-stop after duration (supports ms, s, m, h)
+- `--attach PID` — attach to running process
+- `--all-processes` — trace all Metal apps system-wide
+- `--env VAR=value` — set environment variables for launched process
+- `--target-stdout -` — redirect app stdout to terminal
+- `--no-prompt` — skip prompts (useful in scripts)
+
+### Other useful templates
+
+```bash
+# List all available templates
+xcrun xctrace list templates
+# Key Metal-relevant templates:
+#   - Metal System Trace    (GPU timeline, driver events, counters)
+#   - Game Performance       (Metal + display + thermal)
+#   - Counters               (hardware performance counters)
+#   - GPU                    (GPU-focused template, if available)
+```
+
+### Export trace data as XML
+
+```bash
+# See what's in the trace (table of contents)
+xcrun xctrace export --input trace.trace --toc
+
+# Export Metal driver events (GPU work intervals, wire memory, etc.)
+xcrun xctrace export --input trace.trace \
+  --xpath '/trace-toc/run[@number="1"]/data/table[@schema="metal-driver-event-intervals"]'
+
+# Export to file instead of stdout
+xcrun xctrace export --input trace.trace \
+  --output metal_events.xml \
+  --xpath '/trace-toc/run[@number="1"]/data/table[@schema="metal-driver-event-intervals"]'
+
+# Export GPU counter data
+xcrun xctrace export --input trace.trace \
+  --xpath '/trace-toc/run[@number="1"]/data/table[@schema="gpu-counter-intervals"]'
+```
+
+### Common Metal table schemas
+
+| Schema | Contains |
+|--------|----------|
+| `metal-driver-event-intervals` | Metal driver events (GPU work, wire memory, resource events) |
+| `gpu-counter-intervals` | Hardware GPU performance counters |
+| `metal-gpu-intervals` | GPU execution intervals per encoder |
+| `time-profile` | CPU time profiling samples |
+
+**TIP**: Always run `--toc` first to see available schemas — they vary by template, Xcode version, and GPU.
+
+### Parse exported XML
+
+The XML uses a reference system to avoid duplication. Nodes with `id` attributes are originals; nodes with `ref` attributes point back to them.
+
+```bash
+# Quick extraction with xmllint or python
+xcrun xctrace export --input trace.trace \
+  --xpath '/trace-toc/run[@number="1"]/data/table[@schema="metal-driver-event-intervals"]' \
+  | python3 -c "
+import sys, xml.etree.ElementTree as ET
+tree = ET.parse(sys.stdin)
+for row in tree.findall('.//row'):
+    print([col.get('fmt', col.text or '') for col in row])
+"
+```
+
+## 4. Metal Validation Layers
+
+Runtime error detection for Metal API misuse and shader bugs.
+
+### Enable via environment variables
+
+```bash
+# API Validation — catches Metal API misuse
+export MTL_DEBUG_LAYER=1
+
+# Shader Validation — instruments shaders to detect GPU-side errors
+export MTL_SHADER_VALIDATION=1
+
+# Combined: launch app with both
+MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 /path/to/your/app
+```
+
+### Enable via xctrace
+
+```bash
+xcrun xctrace record \
+  --template 'Metal System Trace' \
+  --env MTL_DEBUG_LAYER=1 \
+  --env MTL_SHADER_VALIDATION=1 \
+  --time-limit 10s \
+  --output validated.trace \
+  --launch -- /path/to/your/app
+```
+
+### Read validation errors
+
+Validation errors appear in stderr and in macOS unified log:
+
+```bash
+# Stream Metal validation errors live
+log stream --predicate 'subsystem == "com.apple.Metal"' --level error
+
+# Search recent logs
+log show --predicate 'subsystem == "com.apple.Metal"' --last 5m
+```
+
+### Programmatic validation log access
+
+If you're writing Metal code, `commandBuffer.logs` provides structured error info after completion — encoder label, debug location (file + line), and error classification.
+
+## 5. Metal Performance HUD
+
+Real-time overlay showing FPS, frame time, GPU time, memory usage.
+
+### Enable
+
+```bash
+# Per-process via environment variable
+MTL_HUD_ENABLED=1 /path/to/your/app
+
+# System-wide (all Metal apps)
+/bin/launchctl setenv MTL_HUD_ENABLED 1
+# Disable:
+/bin/launchctl unsetenv MTL_HUD_ENABLED
+
+# Enable HUD data logging to syslog
+MTL_HUD_ENABLED=1 MTL_HUD_LOGGING_ENABLED=1 /path/to/your/app
+```
+
+### Parse HUD log data
+
+When `MTL_HUD_LOGGING_ENABLED=1`, metrics are logged to the system log:
+
+```bash
+# Stream HUD metrics
+log stream --predicate 'subsystem == "com.apple.Metal" AND category == "HUD"'
+
+# Export recent HUD data
+log show --predicate 'subsystem == "com.apple.Metal" AND category == "HUD"' --last 1m
+```
+
+HUD metrics include: FPS, present interval (frame time), GPU time, process memory, GPU memory, display refresh rate, direct vs composited rendering path.
+
+## 6. Programmatic Frame Capture (.gputrace)
+
+Capture Metal frames to `.gputrace` files without Xcode attached, then inspect buffer/texture data from CLI.
+
+### Via environment variables (MoltenVK / any Metal app)
+
+```bash
+# For Vulkan apps via MoltenVK:
+export METAL_CAPTURE_ENABLED=1
+export MVK_CONFIG_AUTO_GPU_CAPTURE_SCOPE=2          # 1=device lifecycle, 2=first frame
+export MVK_CONFIG_AUTO_GPU_CAPTURE_OUTPUT_FILE=/tmp/capture.gputrace
+/path/to/vulkan/app
+
+# For native Metal apps (requires Info.plist MetalCaptureEnabled=true
+# or METAL_CAPTURE_ENABLED=1 environment variable):
+METAL_CAPTURE_ENABLED=1 /path/to/metal/app
+```
+
+### Via MTLCaptureManager (in-app)
+
+For apps you control, add capture support using MTLCaptureManager. See `capture_frame.swift` for a complete example. The key pattern for adding capture to an existing app:
+
+```swift
+let captureManager = MTLCaptureManager.shared()
+if captureManager.supportsDestination(.gpuTraceDocument) {
+    let descriptor = MTLCaptureDescriptor()
+    descriptor.captureObject = device
+    descriptor.destination = .gpuTraceDocument
+    descriptor.outputURL = URL(fileURLWithPath: "./capture.gputrace")
+    try captureManager.startCapture(with: descriptor)
+
+    // ... encode and submit Metal work ...
+
+    captureManager.stopCapture()
+}
+```
+
+Run with: `METAL_CAPTURE_ENABLED=1 ./your_app`
+
+### Open .gputrace in Xcode
+
+```bash
+open /tmp/capture.gputrace
+# Opens in Xcode's Metal Debugger with full inspection capabilities:
+# - Draw call list and stepping
+# - Pipeline state at each draw
+# - Texture/buffer inspection
+# - Shader debugging
+# - Performance profiling
+# - Dependency viewer
+```
+
+### CLI Inspection of .gputrace (Label Injection Technique)
+
+While Xcode is required for full `.gputrace` inspection (draw calls, pixel history, shader debugging), **buffer and texture data can be read directly from CLI** using the label injection technique:
+
+#### How it works
+
+A `.gputrace` bundle contains `MTLBuffer-{id}-{snapshot}` files that are **raw memory dumps** — the exact bytes from GPU buffer contents at capture time, with no headers or compression. If you know the buffer layout, you can read any value at any index.
+
+The challenge is mapping filenames (e.g., `MTLBuffer-14-0`) to their purpose. This is solved by **label injection**: Claude ensures every Metal object has a `.label` set in the source code, and these labels are preserved in the `.gputrace` `device-resources-*` file.
+
+#### Step 1: Inject labels into source code
+
+When reviewing Metal code, Claude should ensure all buffers, textures, command buffers, and encoders have labels:
+
+```swift
+// Claude adds .label to every Metal object that lacks one
+particleBuffer.label = "Particle Buffer"
+energyBuffer.label = "Energy Buffer"
+colorOutBuffer.label = "Color Output Buffer"
+paramsBuffer.label = "SimParams Buffer"
+commandBuffer.label = "Frame \(frameNumber)"
+encoder.label = "Particle Simulate"
+```
+
+**Rules for label injection:**
+- Add `.label` to every `MTLBuffer`, `MTLTexture`, `MTLCommandBuffer`, and `MTLCommandEncoder`
+- Use descriptive names with spaces (e.g., "Particle Buffer" not "particleBuf")
+- Labels with spaces are reliably distinguishable from internal binary data in the `.gputrace`
+- Never remove existing labels — only add missing ones
+
+#### Step 2: Capture with labels
+
+```bash
+METAL_CAPTURE_ENABLED=1 ./your_app
+```
+
+#### Step 3: Inspect with parse_gputrace.py
+
+```bash
+# List all captured resources with their labels
+python3 parse_gputrace.py capture.gputrace
+
+# Read specific buffer by label (partial match works)
+python3 parse_gputrace.py capture.gputrace --buffer "Color Output" --layout float4 --index 100
+
+# Read particle struct (position float4, velocity float4, color float4)
+python3 parse_gputrace.py capture.gputrace --buffer "Particle" --layout "float4,float4,float4" --index 0-10
+
+# Read scalar energy values
+python3 parse_gputrace.py capture.gputrace --buffer "Energy Output" --layout float --index 98-102
+
+# Dump summary statistics for all buffers
+python3 parse_gputrace.py capture.gputrace --dump-all
+
+# Output as JSON for further processing
+python3 parse_gputrace.py capture.gputrace --buffer "Color Output" --layout float4 --index 100 --json
+```
+
+#### Supported layout types
+
+| Layout | Bytes | Example |
+|--------|-------|---------|
+| `float` | 4 | Scalar energy, distance, time |
+| `float2` | 8 | UV coordinates |
+| `float3` | 12 | Position, normal (without padding) |
+| `float4` | 16 | RGBA color, position+mass, SIMD4 |
+| `uint32` | 4 | Index, count |
+| `int32` | 4 | Signed integer |
+| `float4,float4,float4` | 48 | Compound struct (e.g., Particle) |
+
+#### .gputrace internal structure
+
+| File | Format | Contents |
+|------|--------|----------|
+| `MTLBuffer-{id}-{snap}` | Raw binary (IEEE 754 LE) | GPU buffer memory snapshot |
+| `MTLTexture-{id}-{snap}` | Raw binary | GPU texture memory snapshot |
+| `metadata` | Binary plist | Session UUID, API, device info |
+| `device-resources-*` | MTSP binary | Resource registry with labels, shader names |
+| `store0` | zlib-compressed MTSP | Encoded command buffer data |
+| `capture` / `unsorted-capture` | MTSP binary | Metal API call sequences |
+| `index` | Custom (`xdic` magic) | File table / hash table |
+
+#### What CAN vs CANNOT be done from CLI
+
+| Capability | CLI (parse_gputrace.py) | Xcode GUI |
+|-----------|------------------------|-----------|
+| Read buffer contents at index | ✅ | ✅ |
+| Read texture pixel data | ✅ (if MTLTexture files present) | ✅ |
+| List resources with labels | ✅ | ✅ |
+| List shader function names | ✅ | ✅ |
+| Buffer statistics (min/max/mean) | ✅ | ❌ (manual) |
+| Draw call stepping | ❌ | ✅ |
+| Pixel history | ❌ | ✅ |
+| Shader step-through | ❌ | ✅ |
+| Pipeline state inspection | ❌ | ✅ |
+| Dependency viewer | ❌ | ✅ |
+| Command buffer replay | ❌ | ✅ |
+
+## 7. Metal Shader Compilation
+
+Compile, validate, and inspect Metal shaders from the command line.
+
+### Compile shaders
+
+```bash
+# Compile .metal to intermediate representation (.air)
+xcrun -sdk macosx metal -c MyShader.metal -o MyShader.air
+
+# With warnings and debug info
+xcrun -sdk macosx metal -c -gline-tables-only -Weverything MyShader.metal -o MyShader.air
+
+# Archive
+xcrun -sdk macosx metal-ar rcs MyShader.metalar MyShader.air
+
+# Link into a Metal library (.metallib)
+xcrun -sdk macosx metallib MyShader.metalar -o MyShader.metallib
+
+# One-step compile + link
+xcrun -sdk macosx metal MyShader.metal -o MyShader.metallib
+```
+
+### Cross-compile for specific targets
+
+```bash
+# List available GPU architectures
+xcrun metal-arch
+
+# Target specific platform
+xcrun -sdk iphoneos metal -c Shader.metal -o Shader.air
+xcrun -sdk macosx metal -c -target air64-apple-macos14 Shader.metal -o Shader.air
+```
+
+### HLSL to Metal (via shader converter)
+
+```bash
+# Convert HLSL → DXIL → Metal IR
+dxc shaders.hlsl -T vs_6_0 -E MainVS -Fo vertex.dxil
+metal-shaderconverter vertex.dxil -o vertex.metallib
+```
+
+### Validate shaders without running
+
+```bash
+# Compile with all warnings — catches issues at build time
+xcrun -sdk macosx metal -c -Weverything -Werror MyShader.metal -o /dev/null
+
+# Check Metal version compatibility
+xcrun -sdk macosx metal -c -std=metal3.0 MyShader.metal -o /dev/null
+```
+
+## 8. GPU Device Information
+
+```bash
+# System-level GPU info
+system_profiler SPDisplaysDataType
+
+# Metal feature set / GPU family (grep for relevant info)
+system_profiler SPDisplaysDataType | grep -E "Chipset|Metal|VRAM|GPU"
+```
+
+## 9. Debugging Recipes
+
+### Recipe: Profile GPU performance
+
+```bash
+# 1. Record a Metal System Trace
+xcrun xctrace record \
+  --template 'Metal System Trace' \
+  --time-limit 10s \
+  --output perf.trace \
+  --launch -- /path/to/app
+
+# 2. See what data is available
+xcrun xctrace export --input perf.trace --toc
+
+# 3. Export GPU driver events
+xcrun xctrace export --input perf.trace \
+  --output gpu_events.xml \
+  --xpath '/trace-toc/run[@number="1"]/data/table[@schema="metal-driver-event-intervals"]'
+
+# 4. Export GPU counters (if available)
+xcrun xctrace export --input perf.trace \
+  --output gpu_counters.xml \
+  --xpath '/trace-toc/run[@number="1"]/data/table[@schema="gpu-counter-intervals"]'
+
+# 5. Open in Instruments for visual analysis
+open perf.trace
+```
+
+### Recipe: Find shader compilation errors
+
+```bash
+# 1. Compile with maximum warnings
+xcrun -sdk macosx metal -c -Weverything -Werror MyShader.metal -o /dev/null 2>&1
+
+# 2. If it compiles, check at runtime with validation
+MTL_SHADER_VALIDATION=1 /path/to/app 2>&1 | tee shader_errors.log
+
+# 3. Check logs for shader validation errors
+log show --predicate 'subsystem == "com.apple.Metal"' --last 5m --level error
+```
+
+### Recipe: Detect Metal API misuse
+
+```bash
+# 1. Run with API validation
+MTL_DEBUG_LAYER=1 /path/to/app 2>&1 | tee api_errors.log
+
+# 2. Record with validation for post-mortem analysis
+xcrun xctrace record \
+  --template 'Metal System Trace' \
+  --env MTL_DEBUG_LAYER=1 \
+  --time-limit 10s \
+  --output validated.trace \
+  --launch -- /path/to/app
+
+# 3. Check for errors
+grep -i "error\|warning\|invalid\|violation" api_errors.log
+```
+
+### Recipe: Monitor real-time performance
+
+```bash
+# 1. Enable HUD with logging
+MTL_HUD_ENABLED=1 MTL_HUD_LOGGING_ENABLED=1 /path/to/app &
+APP_PID=$!
+
+# 2. Stream performance data
+log stream --predicate 'subsystem == "com.apple.Metal" AND category == "HUD"' &
+
+# 3. When done, stop
+kill $APP_PID
+```
+
+### Recipe: Capture a frame for Xcode debugging
+
+```bash
+# For Vulkan apps (via MoltenVK)
+METAL_CAPTURE_ENABLED=1 \
+MVK_CONFIG_AUTO_GPU_CAPTURE_SCOPE=2 \
+MVK_CONFIG_AUTO_GPU_CAPTURE_OUTPUT_FILE=/tmp/frame.gputrace \
+/path/to/vulkan/app
+
+# Open in Xcode Metal Debugger
+open /tmp/frame.gputrace
+```
+
+### Recipe: Inspect buffer data from .gputrace (CLI)
+
+```bash
+# 1. Ensure labels are set in source code (Claude should inject these)
+#    buffer.label = "My Buffer"
+
+# 2. Capture a frame
+METAL_CAPTURE_ENABLED=1 ./your_app
+
+# 3. List resources and their labels
+python3 parse_gputrace.py capture.gputrace
+
+# 4. Read specific buffer values by label
+python3 parse_gputrace.py capture.gputrace \
+  --buffer "Color Output" --layout float4 --index 100
+
+# 5. Read compound struct (e.g., Particle = 3x float4)
+python3 parse_gputrace.py capture.gputrace \
+  --buffer "Particle" --layout "float4,float4,float4" --index 0-10
+
+# 6. Dump statistics for all buffers
+python3 parse_gputrace.py capture.gputrace --dump-all
+```
+
+### Recipe: Compare performance before/after a change
+
+```bash
+# 1. Record baseline
+xcrun xctrace record \
+  --template 'Metal System Trace' \
+  --time-limit 10s \
+  --output before.trace \
+  --launch -- /path/to/app
+
+# 2. Make your change, rebuild
+
+# 3. Record after
+xcrun xctrace record \
+  --template 'Metal System Trace' \
+  --time-limit 10s \
+  --output after.trace \
+  --launch -- /path/to/app
+
+# 4. Export both and compare
+xcrun xctrace export --input before.trace --output before.xml \
+  --xpath '/trace-toc/run[@number="1"]/data/table[@schema="metal-driver-event-intervals"]'
+xcrun xctrace export --input after.trace --output after.xml \
+  --xpath '/trace-toc/run[@number="1"]/data/table[@schema="metal-driver-event-intervals"]'
+
+# 5. Diff the XML or parse with Python for numerical comparison
+```
+
+## 10. Output Size Management
+
+Metal System Traces can be very large. Follow these rules:
+
+1. **Use `--time-limit`**: Always limit recording duration (5-10s is usually enough)
+2. **Export specific schemas**: Use `--xpath` to extract only the data you need
+3. **Use `--toc` first**: Understand what's in the trace before bulk-exporting
+4. **Pipe through filters**: Use `grep`, `xmllint`, or Python to extract specific data
+5. **Clean up traces**: `.trace` bundles can be 100MB+; delete when done
+
+## 11. Limitations vs RenderDoc
+
+| Capability | Metal Skill | RenderDoc Skill |
+|-----------|-------------|-----------------|
+| Frame capture | ✅ .gputrace | ✅ .rdc (full CLI) |
+| GPU profiling | ✅ xctrace + export | ⚠️ GPU counters if available |
+| Shader compilation | ✅ xcrun metal | N/A (different workflow) |
+| Validation errors | ✅ env vars + log stream | ✅ API validation layer |
+| Performance HUD | ✅ MTL_HUD_ENABLED | N/A |
+| Buffer inspection (CLI) | ✅ parse_gputrace.py + labels | ✅ rdc buffer |
+| Buffer statistics | ✅ --dump-all (min/max/mean) | ❌ |
+| Draw call inspection | ❌ Xcode only | ✅ rdc draws/pipeline |
+| Pixel history | ❌ Xcode only | ✅ rdc pixel |
+| Shader step-through | ❌ Xcode only | ✅ rdc debug pixel |
+| Render target export | ❌ Xcode only | ✅ rdc rt → PNG |
+| Texture readback (CLI) | ⚠️ MTLTexture files (if present) | ✅ Full rdc-cli API |
+
+**Key difference**: Metal debugging is split between CLI (profiling/validation/buffer inspection) and GUI (Xcode for draw calls, pixel history, shader debugging). The label injection technique with `parse_gputrace.py` partially bridges this gap by enabling CLI buffer/texture data inspection from `.gputrace` captures. RenderDoc still provides more complete CLI access.
+
+## Command Reference
+
+For the complete xctrace command reference, see [references/xctrace-quick-ref.md](references/xctrace-quick-ref.md).
+
+For extended debugging recipes, see [references/debugging-recipes.md](references/debugging-recipes.md).

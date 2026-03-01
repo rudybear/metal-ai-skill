@@ -1,0 +1,20 @@
+# Build artifacts
+*.air
+*.metallib
+*.o
+buggy_renderer
+visual_demo
+
+# GPU captures and traces
+*.gputrace
+*.trace
+traces/
+
+# Output
+output.png
+
+# macOS
+.DS_Store
+
+# Claude Code
+.claude/projects/
