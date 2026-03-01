@@ -748,6 +748,64 @@ python3 parse_gputrace.py capture.gputrace --buffer "Color Output" --layout floa
 | Dependency viewer | ❌ | ✅ |
 | Command buffer replay | ❌ | ✅ |
 
+### Window Screenshot Capture (Visual Verification)
+
+Claude can capture screenshots of a running Metal app's window to visually inspect rendering output. This closes the debugging loop — after fixing bugs, Claude captures a screenshot and compares before vs after.
+
+#### Capture a window screenshot
+
+```bash
+# Launch the app in background
+./your_app &
+APP_PID=$!
+sleep 1
+
+# Capture the app's window (macOS screencapture -w captures the frontmost window)
+screencapture -w -x /tmp/screenshot.png
+
+# Stop the app
+kill $APP_PID 2>/dev/null
+```
+
+The `-x` flag suppresses the shutter sound. The `-w` flag captures the frontmost window including its title bar chrome.
+
+#### Before/after comparison workflow
+
+```bash
+# 1. Build and screenshot the buggy version
+./build_and_run.sh
+./your_app &
+sleep 1
+screencapture -w -x before.png
+kill %1 2>/dev/null
+
+# 2. Fix the bugs in source code
+# ... Claude edits shaders / Swift files ...
+
+# 3. Rebuild and screenshot the fixed version
+./build_and_run.sh
+./your_app &
+sleep 1
+screencapture -w -x after.png
+kill %1 2>/dev/null
+
+# 4. Claude reads both images to visually verify the fix
+```
+
+Claude can read PNG/JPG images directly, so after capturing a screenshot it can verify:
+- Triangle orientation and position are correct
+- Vertex colors match expected RGB values
+- Background color is correct
+- No visual artifacts or transparency issues
+
+#### When to use screenshots vs .gputrace
+
+| Technique | Use when |
+|-----------|----------|
+| Screenshot | Verifying visual output, comparing before/after, checking layout/colors |
+| .gputrace | Reading exact buffer values, diagnosing data issues, analyzing shader inputs |
+| Both | Full debugging: .gputrace for diagnosis, screenshot for visual verification |
+
 ## 7. Metal Shader Compilation
 
 Compile, validate, and inspect Metal shaders from the command line.
@@ -921,6 +979,35 @@ python3 parse_gputrace.py capture.gputrace \
 python3 parse_gputrace.py capture.gputrace --dump-all
 ```
 
+### Recipe: Visual debugging with screenshots
+
+```bash
+# 1. Build and run the buggy app
+./build_and_run.sh
+./your_app &
+sleep 1
+
+# 2. Capture the broken output
+screencapture -w -x before.png
+kill %1 2>/dev/null
+
+# 3. Capture .gputrace for data analysis
+METAL_CAPTURE_ENABLED=1 ./your_app --capture
+python3 parse_gputrace.py capture.gputrace
+
+# 4. Read source code, diagnose bugs, apply fixes
+# ... edit shaders and Swift files ...
+
+# 5. Rebuild and verify visually
+./build_and_run.sh
+./your_app &
+sleep 1
+screencapture -w -x after.png
+kill %1 2>/dev/null
+
+# 6. Claude reads before.png and after.png to confirm the fix
+```
+
 ### Recipe: Compare performance before/after a change
 
 ```bash
@@ -975,6 +1062,7 @@ Metal System Traces can be very large. Follow these rules:
 | Shader step-through | ❌ Xcode only | ✅ rdc debug pixel |
 | Render target export | ❌ Xcode only | ✅ rdc rt → PNG |
 | Texture readback (CLI) | ⚠️ MTLTexture files (if present) | ✅ Full rdc-cli API |
+| Visual output inspection | ✅ screencapture + image read | ❌ (headless only) |
 
 **Key difference**: Metal debugging is split between CLI (profiling/validation/buffer inspection) and GUI (Xcode for draw calls, pixel history, shader debugging). The label injection technique with `parse_gputrace.py` partially bridges this gap by enabling CLI buffer/texture data inspection from `.gputrace` captures. RenderDoc still provides more complete CLI access.
 
