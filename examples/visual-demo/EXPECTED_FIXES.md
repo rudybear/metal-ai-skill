@@ -54,10 +54,10 @@ float a = color.a;
 **Fix**:
 ```swift
 // REPLACE:
-Vertex(position: SIMD2<Float>(0.9, 0.8), ...)
+Vertex(px: 0.9, py: 0.8, ...)
 
 // WITH:
-Vertex(position: SIMD2<Float>(0.0, 0.8), ...)
+Vertex(px: 0.0, py: 0.8, ...)
 ```
 
 ## Bug 5: Clear color is black (should be dark gray)
