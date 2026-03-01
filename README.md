@@ -57,6 +57,17 @@ cp -r .metal-ai/.claude .
 
 Edit `CLAUDE.md` in your project root with your app-specific details (executable path, shader locations, debug markers).
 
+## MCP Server (Alternative)
+
+Instead of the Claude Code skill, you can use the MCP server for structured tool access:
+
+```bash
+pip install -r requirements-mcp.txt
+claude mcp add metal-tools -- python /path/to/metal-ai-skill/mcp_server/server.py
+```
+
+This registers 9 tools (`metal_doctor`, `metal_trace`, `metal_parse_trace`, `metal_capture`, `metal_shader`, `metal_validate`, `metal_hud`, `metal_screenshot`, `metal_command`), 2 resources (`metal://traces`, `metal://captures`), and 7 debugging prompts.
+
 ## Usage
 
 Once installed, Claude Code will automatically use this skill when you ask about Metal GPU debugging. Example prompts:
@@ -79,6 +90,11 @@ metal-ai-skill/
 │           └── references/
 │               ├── xctrace-quick-ref.md          # xctrace command reference
 │               └── debugging-recipes.md          # Extended debugging workflows
+├── mcp_server/                                   # MCP server (alternative integration)
+│   ├── __init__.py
+│   ├── server.py                                 # FastMCP server — 9 tools, 2 resources, 7 prompts
+│   ├── metal_runner.py                           # Async subprocess wrapper
+│   └── recipes.py                                # Debugging recipe strings for prompts
 ├── examples/
 │   ├── buggy-renderer/                           # 10-bug compute shader demo
 │   │   ├── main.swift                            # Headless particle simulation
@@ -92,6 +108,7 @@ metal-ai-skill/
 ├── capture_frame.swift                           # Example: programmatic frame capture
 ├── parse_trace.py                                # Parse xctrace XML exports to TSV/JSON/CSV
 ├── parse_gputrace.py                             # Inspect .gputrace buffer/texture data from CLI
+├── requirements-mcp.txt                          # MCP server dependencies
 ├── LICENSE
 └── README.md
 ```
@@ -156,7 +173,7 @@ python3 parse_gputrace.py capture.gputrace --buffer "Color Output" --layout floa
 
 ## Visual Demo
 
-[Watch the demo on YouTube](https://www.youtube.com/watch?v=ov_v3b5gNCE)
+[![Watch the demo](https://img.youtube.com/vi/ov_v3b5gNCE/maxresdefault.jpg)](https://www.youtube.com/watch?v=ov_v3b5gNCE)
 
 The `examples/visual-demo/` contains a broken Metal cube renderer with **4 intentional bugs** that produce visibly wrong output. It demonstrates Claude Code's autonomous debugging workflow — screenshot, .gputrace capture, shader compilation, source code analysis, and fix/verify loop.
 
