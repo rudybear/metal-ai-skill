@@ -3,6 +3,7 @@
 #
 # Usage:
 #   ./build_and_run.sh              # Build and run (opens window)
+#   ./build_and_run.sh --screenshot # Build, render, save output.png, exit
 #   ./build_and_run.sh --capture    # Build, capture .gputrace, analyze
 #   ./build_and_run.sh --clean      # Remove build artifacts
 
@@ -44,6 +45,12 @@ run_capture() {
     fi
 }
 
+run_screenshot() {
+    echo ""
+    echo "Rendering and saving screenshot..."
+    ./visual_demo --screenshot
+}
+
 clean() {
     rm -f Shaders.air Shaders.metallib visual_demo
     rm -rf capture.gputrace
@@ -51,6 +58,10 @@ clean() {
 }
 
 case "${1:-}" in
+    --screenshot)
+        build
+        run_screenshot
+        ;;
     --capture)
         build
         run_capture
@@ -59,10 +70,11 @@ case "${1:-}" in
         clean
         ;;
     --help|-h)
-        echo "Usage: $0 [--capture|--clean]"
-        echo "  (no args)    Build and run (opens window)"
-        echo "  --capture    Build, capture .gputrace, analyze"
-        echo "  --clean      Remove build artifacts"
+        echo "Usage: $0 [--screenshot|--capture|--clean]"
+        echo "  (no args)      Build and run (opens window)"
+        echo "  --screenshot   Build, render, save output.png, exit"
+        echo "  --capture      Build, capture .gputrace, analyze"
+        echo "  --clean        Remove build artifacts"
         ;;
     *)
         build

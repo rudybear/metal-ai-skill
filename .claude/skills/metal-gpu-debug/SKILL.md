@@ -748,11 +748,86 @@ python3 parse_gputrace.py capture.gputrace --buffer "Color Output" --layout floa
 | Dependency viewer | ❌ | ✅ |
 | Command buffer replay | ❌ | ✅ |
 
-### Window Screenshot Capture (Visual Verification)
+### Visual Verification (Screenshot Capture)
 
-Claude can capture screenshots of a running Metal app's window to visually inspect rendering output. This closes the debugging loop — after fixing bugs, Claude captures a screenshot and compares before vs after.
+Claude can capture screenshots of a Metal app's rendered output to visually inspect rendering. This closes the debugging loop — after fixing bugs, Claude captures a screenshot and compares before vs after.
 
-#### Capture a window screenshot
+#### Method 1: In-app auto-screenshot (Preferred)
+
+The most reliable approach is to add a `--screenshot` mode to the app itself. This renders a few frames, reads back the framebuffer texture, and saves it as a PNG — no external tools required.
+
+**Swift code to add to your Metal app:**
+
+```swift
+// Add to your renderer class:
+static func saveTexture(_ texture: MTLTexture, to path: String) {
+    let w = texture.width, h = texture.height
+    let bytesPerRow = w * 4
+    var pixels = [UInt8](repeating: 0, count: h * bytesPerRow)
+    texture.getBytes(&pixels, bytesPerRow: bytesPerRow,
+                     from: MTLRegion(origin: MTLOrigin(), size: MTLSize(width: w, height: h, depth: 1)),
+                     mipmapLevel: 0)
+    // BGRA → RGBA, force alpha to 255 for screenshot visibility
+    for i in stride(from: 0, to: pixels.count, by: 4) {
+        let tmp = pixels[i]
+        pixels[i] = pixels[i + 2]
+        pixels[i + 2] = tmp
+        pixels[i + 3] = 255
+    }
+    let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h,
+                                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                isPlanar: false, colorSpaceName: .deviceRGB,
+                                bytesPerRow: bytesPerRow, bitsPerPixel: 32)!
+    memcpy(rep.bitmapData!, &pixels, pixels.count)
+    let data = rep.representation(using: .png, properties: [:])!
+    try! data.write(to: URL(fileURLWithPath: path))
+}
+```
+
+**Usage in the draw loop** (save after a few frames, then exit):
+
+```swift
+// In draw(in:) after cb.present(drawable) and cb.commit():
+if frameCount == 3 && screenshotMode {
+    cb.waitUntilCompleted()
+    Self.saveTexture(drawable.texture, to: "./output.png")
+    print("Screenshot saved: ./output.png")
+    DispatchQueue.main.async { NSApp.terminate(nil) }
+}
+```
+
+**Important**: Set `metalView.framebufferOnly = false` before rendering to allow texture readback.
+
+**Build script integration:**
+
+```bash
+# Add --screenshot mode to your build script
+run_screenshot() {
+    echo "Rendering and saving screenshot..."
+    ./your_app --screenshot
+}
+```
+
+**Before/after workflow with auto-screenshot:**
+
+```bash
+# 1. Screenshot the buggy version
+./build_and_run.sh --screenshot
+# → saves output.png automatically
+
+# 2. Claude reads output.png to diagnose issues
+# 3. Claude fixes bugs in source code
+
+# 4. Rebuild and screenshot the fixed version
+./build_and_run.sh --screenshot
+# → overwrites output.png with fixed output
+
+# 5. Claude reads output.png to verify the fix
+```
+
+#### Method 2: macOS screencapture (Fallback)
+
+If the app doesn't support `--screenshot`, use macOS `screencapture` to capture the window:
 
 ```bash
 # Launch the app in background
@@ -760,36 +835,11 @@ Claude can capture screenshots of a running Metal app's window to visually inspe
 APP_PID=$!
 sleep 1
 
-# Capture the app's window (macOS screencapture -w captures the frontmost window)
+# Capture the app's window (-w = frontmost window, -x = no sound)
 screencapture -w -x /tmp/screenshot.png
 
 # Stop the app
 kill $APP_PID 2>/dev/null
-```
-
-The `-x` flag suppresses the shutter sound. The `-w` flag captures the frontmost window including its title bar chrome.
-
-#### Before/after comparison workflow
-
-```bash
-# 1. Build and screenshot the buggy version
-./build_and_run.sh
-./your_app &
-sleep 1
-screencapture -w -x before.png
-kill %1 2>/dev/null
-
-# 2. Fix the bugs in source code
-# ... Claude edits shaders / Swift files ...
-
-# 3. Rebuild and screenshot the fixed version
-./build_and_run.sh
-./your_app &
-sleep 1
-screencapture -w -x after.png
-kill %1 2>/dev/null
-
-# 4. Claude reads both images to visually verify the fix
 ```
 
 Claude can read PNG/JPG images directly, so after capturing a screenshot it can verify:
@@ -982,30 +1032,31 @@ python3 parse_gputrace.py capture.gputrace --dump-all
 ### Recipe: Visual debugging with screenshots
 
 ```bash
-# 1. Build and run the buggy app
-./build_and_run.sh
-./your_app &
-sleep 1
+# 1. Build and screenshot the buggy version (auto-saves output.png)
+./build_and_run.sh --screenshot
+cp output.png before.png
 
-# 2. Capture the broken output
-screencapture -w -x before.png
-kill %1 2>/dev/null
-
-# 3. Capture .gputrace for data analysis
-METAL_CAPTURE_ENABLED=1 ./your_app --capture
+# 2. Capture .gputrace for data analysis
+./build_and_run.sh --capture
 python3 parse_gputrace.py capture.gputrace
 
-# 4. Read source code, diagnose bugs, apply fixes
+# 3. Claude reads output.png + source code, diagnoses bugs, applies fixes
 # ... edit shaders and Swift files ...
 
-# 5. Rebuild and verify visually
-./build_and_run.sh
+# 4. Rebuild and screenshot the fixed version
+./build_and_run.sh --screenshot
+cp output.png after.png
+
+# 5. Claude reads output.png to verify the fix
+```
+
+If the app doesn't have `--screenshot` mode, fall back to `screencapture`:
+
+```bash
 ./your_app &
 sleep 1
-screencapture -w -x after.png
+screencapture -w -x output.png
 kill %1 2>/dev/null
-
-# 6. Claude reads before.png and after.png to confirm the fix
 ```
 
 ### Recipe: Compare performance before/after a change
@@ -1062,7 +1113,7 @@ Metal System Traces can be very large. Follow these rules:
 | Shader step-through | ❌ Xcode only | ✅ rdc debug pixel |
 | Render target export | ❌ Xcode only | ✅ rdc rt → PNG |
 | Texture readback (CLI) | ⚠️ MTLTexture files (if present) | ✅ Full rdc-cli API |
-| Visual output inspection | ✅ screencapture + image read | ❌ (headless only) |
+| Visual output inspection | ✅ in-app saveTexture or screencapture | ❌ (headless only) |
 
 **Key difference**: Metal debugging is split between CLI (profiling/validation/buffer inspection) and GUI (Xcode for draw calls, pixel history, shader debugging). The label injection technique with `parse_gputrace.py` partially bridges this gap by enabling CLI buffer/texture data inspection from `.gputrace` captures. RenderDoc still provides more complete CLI access.
 

@@ -14,9 +14,9 @@ struct Vertex {
 }
 
 let vertices: [Vertex] = [
-    Vertex(px: 0.9, py: 0.8,   cr: 1, cg: 0, cb: 0, ca: 1),  // RED
-    Vertex(px: -0.8, py: -0.8, cr: 0, cg: 1, cb: 0, ca: 1),  // GREEN
-    Vertex(px: 0.8, py: -0.8,  cr: 0, cg: 0, cb: 1, ca: 1),  // BLUE
+    Vertex(px: 0.0, py: 0.8,   cr: 1, cg: 0, cb: 0, ca: 1),  // RED — top right
+    Vertex(px: -0.8, py: -0.8, cr: 0, cg: 1, cb: 0, ca: 1),  // GREEN — bottom left
+    Vertex(px: 0.8, py: -0.8,  cr: 0, cg: 0, cb: 1, ca: 1),  // BLUE — bottom right
 ]
 
 // --- Renderer ---
@@ -28,11 +28,15 @@ class TriangleRenderer: NSObject, MTKViewDelegate {
     let vertexBuffer: MTLBuffer
     let captureManager = MTLCaptureManager.shared()
     let captureMode: Bool
+    let screenshotMode: Bool
+    let screenshotPath: String
     var frameCount = 0
 
-    init(device: MTLDevice, view: MTKView, captureMode: Bool) {
+    init(device: MTLDevice, view: MTKView, captureMode: Bool, screenshotMode: Bool, screenshotPath: String = "./output.png") {
         self.device = device
         self.captureMode = captureMode
+        self.screenshotMode = screenshotMode
+        self.screenshotPath = screenshotPath
         self.commandQueue = device.makeCommandQueue()!
 
         let libraryURL = URL(fileURLWithPath: "./Shaders.metallib")
@@ -113,7 +117,38 @@ class TriangleRenderer: NSObject, MTKViewDelegate {
             }
         }
 
+        // Save screenshot after a few frames to ensure window is fully rendered
+        if frameCount == 3 && screenshotMode {
+            cb.waitUntilCompleted()
+            Self.saveTexture(drawable.texture, to: screenshotPath)
+            print("Screenshot saved: \(screenshotPath)")
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+        }
+
         frameCount += 1
+    }
+
+    static func saveTexture(_ texture: MTLTexture, to path: String) {
+        let w = texture.width, h = texture.height
+        let bytesPerRow = w * 4
+        var pixels = [UInt8](repeating: 0, count: h * bytesPerRow)
+        texture.getBytes(&pixels, bytesPerRow: bytesPerRow,
+                         from: MTLRegion(origin: MTLOrigin(), size: MTLSize(width: w, height: h, depth: 1)),
+                         mipmapLevel: 0)
+        // BGRA → RGBA, force alpha to 255 for screenshot visibility
+        for i in stride(from: 0, to: pixels.count, by: 4) {
+            let tmp = pixels[i]
+            pixels[i] = pixels[i + 2]
+            pixels[i + 2] = tmp
+            pixels[i + 3] = 255
+        }
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h,
+                                    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                    isPlanar: false, colorSpaceName: .deviceRGB,
+                                    bytesPerRow: bytesPerRow, bitsPerPixel: 32)!
+        memcpy(rep.bitmapData!, &pixels, pixels.count)
+        let data = rep.representation(using: .png, properties: [:])!
+        try! data.write(to: URL(fileURLWithPath: path))
     }
 }
 
@@ -128,6 +163,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 // --- Main ---
 
 let captureMode = CommandLine.arguments.contains("--capture")
+let screenshotMode = CommandLine.arguments.contains("--screenshot")
 
 let app = NSApplication.shared
 let delegate = AppDelegate()
@@ -154,8 +190,11 @@ metalView.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
 metalView.colorPixelFormat = .bgra8Unorm
 metalView.preferredFramesPerSecond = 60
 metalView.autoresizingMask = [.width, .height]
+if screenshotMode {
+    metalView.framebufferOnly = false  // Allow texture readback for screenshots
+}
 
-let renderer = TriangleRenderer(device: device, view: metalView, captureMode: captureMode)
+let renderer = TriangleRenderer(device: device, view: metalView, captureMode: captureMode, screenshotMode: screenshotMode)
 metalView.delegate = renderer
 
 window.contentView = metalView
