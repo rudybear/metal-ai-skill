@@ -39,7 +39,7 @@ run_capture() {
         python3 ../../parse_gputrace.py capture.gputrace
         echo ""
         echo "Vertex data from capture:"
-        python3 ../../parse_gputrace.py capture.gputrace --buffer "Triangle Vertices" --layout "float2,float4" --index 0-2
+        python3 ../../parse_gputrace.py capture.gputrace --buffer "Cube Vertices" --layout "float3,float4" --index 0-5
         echo ""
         echo "Open in Xcode: open capture.gputrace"
     fi

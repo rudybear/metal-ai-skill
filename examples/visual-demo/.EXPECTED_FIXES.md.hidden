@@ -1,0 +1,75 @@
+# Expected Fixes — Visual Demo Answer Key
+
+## Bug 1: Front face geometry broken (collapsed vertices)
+
+**File**: `main.swift`, `makeCubeVertices()`
+**Detection**: `parse_gputrace.py --buffer "Cube Vertices" --layout "float3,float4" --index 0-5` shows front face vertices 2 and 4 at position (0, 0, 0.5) instead of (0.5, 0.5, 0.5) — two corners of the front face collapse to the center, distorting the cube.
+
+**Fix**:
+```swift
+// REPLACE (front face triangles):
+v(-s, -s,  s, RED), v( s, -s,  s, RED), v( 0,  0,  s, RED),
+v(-s, -s,  s, RED), v( 0,  0,  s, RED), v(-s,  s,  s, RED),
+
+// WITH:
+v(-s, -s,  s, RED), v( s, -s,  s, RED), v( s,  s,  s, RED),
+v(-s, -s,  s, RED), v( s,  s,  s, RED), v(-s,  s,  s, RED),
+```
+
+## Bug 2: Cube flipped upside down (Y negation after MVP)
+
+**File**: `Shaders.metal`, `vertex_main`
+**Detection**: Visual inspection of output.png — the cube appears flipped vertically. The top face (blue) appears at the bottom.
+
+**Fix**:
+```metal
+// REPLACE:
+out.position = uniforms.mvpMatrix * float4(in.position, 1.0);
+out.position.y *= -1.0;
+
+// WITH:
+out.position = uniforms.mvpMatrix * float4(in.position, 1.0);
+```
+
+## Bug 3: Color channels swapped (R↔B swap)
+
+**File**: `Shaders.metal`, `fragment_main`
+**Detection**: `parse_gputrace.py --buffer "Cube Vertices"` shows front face has color (1,0,0,1) = RED, but the output pixel shows blue — R and B channels are swapped.
+
+**Fix**:
+```metal
+// REPLACE:
+float r = color.b;
+float g = color.g;
+float b = color.r;
+
+// WITH:
+float r = color.r;
+float g = color.g;
+float b = color.b;
+```
+
+## Bug 4: Alpha forced to zero (transparent output)
+
+**File**: `Shaders.metal`, `fragment_main`
+**Detection**: Render target pixels all have A=0. The cube may appear invisible or only visible due to screenshot alpha override.
+
+**Fix**:
+```metal
+// REPLACE:
+float a = color.a * 0.0;
+
+// WITH:
+float a = color.a;
+```
+
+## Verification
+
+After all fixes:
+```bash
+./build_and_run.sh --screenshot
+open output.png
+# Should show: a 3D cube with correct face colors
+# Front=RED, Right=MAGENTA, Top=BLUE visible
+# Properly oriented (not flipped), fully opaque
+```

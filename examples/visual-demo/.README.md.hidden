@@ -1,0 +1,57 @@
+# Visual Demo — Metal Debug Skill
+
+A windowed Metal rendering app with **4 intentional bugs** that produce visibly broken output. Designed to demonstrate Claude Code's ability to diagnose rendering issues from `.gputrace` buffer analysis.
+
+## What It Renders
+
+A colored 3D cube (6 faces, each a different color) rendered to a 512x512 window, saved as `output.png`. The bugs make it look obviously wrong — distorted geometry, flipped, wrong colors, and transparent.
+
+## Quick Start
+
+```bash
+chmod +x build_and_run.sh
+./build_and_run.sh                # Build, render, open window
+./build_and_run.sh --screenshot   # Build, render, save output.png, exit
+
+./build_and_run.sh --capture      # Capture + analyze .gputrace
+```
+
+## The 4 Bugs
+
+| # | File | Bug | How Claude Detects It |
+|---|------|-----|----------------------|
+| 1 | main.swift | Front face vertices at (0,0,0.5) instead of (0.5,0.5,0.5) | `parse_gputrace.py --buffer "Cube Vertices"` shows collapsed front face |
+| 2 | Shaders.metal | `out.position.y *= -1.0` after MVP (flips cube) | Visual inspection — cube is upside down |
+| 3 | Shaders.metal | R↔B channels swapped in fragment shader | Vertex buffer has RED face but output shows BLUE |
+| 4 | Shaders.metal | Alpha multiplied by 0 (transparent) | Render target pixels all have A=0 |
+
+## How Claude Debugs It
+
+```bash
+# 1. Capture a frame
+METAL_CAPTURE_ENABLED=1 ./visual_demo --capture
+
+# 2. List resources
+python3 ../../parse_gputrace.py capture.gputrace
+# Resources:
+#   MTLBuffer-X-0  → Cube Vertices
+#   MTLTexture-Y-0 → Render Target
+
+# 3. Read vertex buffer — spots Bug 1 (collapsed front face)
+python3 ../../parse_gputrace.py capture.gputrace \
+  --buffer "Cube Vertices" --layout "float3,float4" --index 0-5
+# [0] (-0.5000, -0.5000, 0.5000) | (1.0000, 0.0000, 0.0000, 1.0000)
+# [1] (0.5000, -0.5000, 0.5000)  | (1.0000, 0.0000, 0.0000, 1.0000)
+# [2] (0.0000, 0.0000, 0.5000)   | (1.0000, 0.0000, 0.0000, 1.0000)  ← should be (0.5, 0.5, 0.5)!
+# [3] (-0.5000, -0.5000, 0.5000) | (1.0000, 0.0000, 0.0000, 1.0000)
+# [4] (0.0000, 0.0000, 0.5000)   | (1.0000, 0.0000, 0.0000, 1.0000)  ← should be (0.5, 0.5, 0.5)!
+# [5] (-0.5000, 0.5000, 0.5000)  | (1.0000, 0.0000, 0.0000, 1.0000)
+
+# 4. Claude reads the shaders, spots Bugs 2, 3, 4
+# 5. Claude fixes all bugs, rebuilds, verifies output.png is correct
+```
+
+## Expected Output
+
+**Before (buggy)**: Distorted cube with collapsed front face, flipped, wrong colors, transparent
+**After (fixed)**: Properly oriented 3D cube with RED front, MAGENTA right, BLUE top

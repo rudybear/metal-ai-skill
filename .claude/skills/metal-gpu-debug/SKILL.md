@@ -650,43 +650,104 @@ open /tmp/capture.gputrace
 # - Dependency viewer
 ```
 
-### CLI Inspection of .gputrace (Label Injection Technique)
+### Autonomous Metal Debugging Workflow
 
-While Xcode is required for full `.gputrace` inspection (draw calls, pixel history, shader debugging), **buffer and texture data can be read directly from CLI** using the label injection technique:
+When debugging a Metal rendering issue, Claude executes this workflow autonomously. It maximizes signal by gathering data from multiple sources in parallel, then branches based on what data is actually available.
 
-#### How it works
+#### Step 1: Gather all signal sources (run in parallel)
 
-A `.gputrace` bundle contains `MTLBuffer-{id}-{snapshot}` files that are **raw memory dumps** — the exact bytes from GPU buffer contents at capture time, with no headers or compression. If you know the buffer layout, you can read any value at any index.
-
-The challenge is mapping filenames (e.g., `MTLBuffer-14-0`) to their purpose. This is solved by **label injection**: Claude ensures every Metal object has a `.label` set in the source code, and these labels are preserved in the `.gputrace` `device-resources-*` file.
-
-#### Step 1: Inject labels into source code
-
-When reviewing Metal code, Claude should ensure all buffers, textures, command buffers, and encoders have labels:
-
-```swift
-// Claude adds .label to every Metal object that lacks one
-particleBuffer.label = "Particle Buffer"
-energyBuffer.label = "Energy Buffer"
-colorOutBuffer.label = "Color Output Buffer"
-paramsBuffer.label = "SimParams Buffer"
-commandBuffer.label = "Frame \(frameNumber)"
-encoder.label = "Particle Simulate"
-```
-
-**Rules for label injection:**
-- Add `.label` to every `MTLBuffer`, `MTLTexture`, `MTLCommandBuffer`, and `MTLCommandEncoder`
-- Use descriptive names with spaces (e.g., "Particle Buffer" not "particleBuf")
-- Labels with spaces are reliably distinguishable from internal binary data in the `.gputrace`
-- Never remove existing labels — only add missing ones
-
-#### Step 2: Capture with labels
+Launch these data-gathering steps simultaneously — they are independent:
 
 ```bash
-METAL_CAPTURE_ENABLED=1 ./your_app
+# A. Screenshot the app's rendered output
+./build_and_run.sh --screenshot        # preferred: in-app framebuffer readback
+# OR: screencapture -w -x output.png   # fallback: macOS window capture
+
+# B. Capture .gputrace (programmatic)
+METAL_CAPTURE_ENABLED=1 ./your_app     # produces capture.gputrace
+
+# C. Compile shaders with maximum warnings
+xcrun -sdk macosx metal -c -Weverything Shaders.metal -o /dev/null 2>&1
+
+# D. Read source code — Claude reads .metal files and Swift renderer code directly
 ```
 
-#### Step 3: Inspect with parse_gputrace.py
+#### Step 2: Analyze the capture
+
+```bash
+# 2a. List all resources and shader functions
+python3 parse_gputrace.py capture.gputrace
+
+# 2b. Check what data files exist in the capture
+ls capture.gputrace/MTLBuffer-* 2>/dev/null && echo "BUFFER DATA AVAILABLE" || echo "NO BUFFER FILES"
+ls capture.gputrace/MTLTexture-* 2>/dev/null && echo "TEXTURE DATA AVAILABLE" || echo "NO TEXTURE FILES"
+```
+
+**Branch on buffer availability:**
+
+- **MTLBuffer files exist** (Xcode-initiated captures): Parse buffer data directly
+  ```bash
+  python3 parse_gputrace.py capture.gputrace --buffer "Vertex" --layout float4 --index 0-10
+  python3 parse_gputrace.py capture.gputrace --dump-all
+  ```
+- **No MTLBuffer files** (typical for programmatic captures): Fall back to source code analysis
+  - Read the Swift/ObjC code that creates and fills buffers
+  - Read the `.metal` shader code that consumes the buffers
+  - The capture metadata still tells you what resources exist and what shaders run — use this as an inventory to guide source code reading
+- **MTLTexture files exist**: Read raw texture data for render target analysis
+
+#### Step 3: Diagnose from all available sources
+
+Combine signal from every source gathered in Steps 1–2. Each source catches different bug categories:
+
+| Source | What it reveals | Bug categories |
+|--------|----------------|----------------|
+| **Screenshot** | Visual output | Wrong colors, flipped geometry, missing faces, transparency issues, blank screen |
+| **Source code** (.metal + Swift) | Logic and data flow | Wrong vertex data, shader math errors, incorrect pipeline config, buffer layout mismatches |
+| **Capture metadata** | Resource inventory | Confirms what buffers/textures exist, shader function names, resource labels |
+| **Shader compilation warnings** | Static analysis | Unused variables, implicit conversions, potential precision issues |
+| **Validation errors** (if enabled) | API correctness | Mismatched formats, missing bindings, out-of-bounds access, shader faults |
+
+**Decision logic when buffer data is unavailable:**
+- If no `MTLBuffer` files → Claude reads source code to understand vertex data, uniform values, and buffer layouts
+- If no `MTLTexture` files → Claude uses screenshot for visual inspection of rendered output
+- Programmatic captures always provide: resource labels, shader function names, texture snapshots (render targets)
+
+#### Step 4: Fix and verify
+
+```bash
+# 1. Apply fixes to source code (.metal shaders, Swift renderer)
+
+# 2. Rebuild and screenshot
+./build_and_run.sh --screenshot
+
+# 3. Compare before/after visually (Claude reads output.png)
+
+# 4. If still wrong, repeat from Step 1
+```
+
+The loop continues until the screenshot shows correct output or the user is satisfied.
+
+### Label Injection
+
+Claude should ensure every Metal object has a `.label` set in source code. Labels are preserved in `.gputrace` captures and enable resource identification from CLI.
+
+```swift
+// Add .label to every MTLBuffer, MTLTexture, MTLCommandBuffer, MTLCommandEncoder
+vertexBuffer.label = "Vertex Buffer"
+colorBuffer.label = "Color Buffer"
+uniformBuffer.label = "Uniform Buffer"
+commandBuffer.label = "Frame \(frameNumber)"
+encoder.label = "Main Render Pass"
+```
+
+**Rules:**
+- Use descriptive names with spaces (e.g., "Particle Buffer" not "particleBuf")
+- Labels with spaces are reliably distinguishable from binary data in the `.gputrace`
+- Never remove existing labels — only add missing ones
+- Add labels to every object that lacks one
+
+### Reference: parse_gputrace.py usage
 
 ```bash
 # List all captured resources with their labels
@@ -695,16 +756,13 @@ python3 parse_gputrace.py capture.gputrace
 # Read specific buffer by label (partial match works)
 python3 parse_gputrace.py capture.gputrace --buffer "Color Output" --layout float4 --index 100
 
-# Read particle struct (position float4, velocity float4, color float4)
+# Read compound struct (e.g., Particle = position + velocity + color)
 python3 parse_gputrace.py capture.gputrace --buffer "Particle" --layout "float4,float4,float4" --index 0-10
-
-# Read scalar energy values
-python3 parse_gputrace.py capture.gputrace --buffer "Energy Output" --layout float --index 98-102
 
 # Dump summary statistics for all buffers
 python3 parse_gputrace.py capture.gputrace --dump-all
 
-# Output as JSON for further processing
+# Output as JSON
 python3 parse_gputrace.py capture.gputrace --buffer "Color Output" --layout float4 --index 100 --json
 ```
 
@@ -720,7 +778,7 @@ python3 parse_gputrace.py capture.gputrace --buffer "Color Output" --layout floa
 | `int32` | 4 | Signed integer |
 | `float4,float4,float4` | 48 | Compound struct (e.g., Particle) |
 
-#### .gputrace internal structure
+### Reference: .gputrace internal structure
 
 | File | Format | Contents |
 |------|--------|----------|
@@ -732,25 +790,23 @@ python3 parse_gputrace.py capture.gputrace --buffer "Color Output" --layout floa
 | `capture` / `unsorted-capture` | MTSP binary | Metal API call sequences |
 | `index` | Custom (`xdic` magic) | File table / hash table |
 
-#### What CAN vs CANNOT be done from CLI
+### Reference: CLI capabilities by capture type
 
-| Capability | CLI (parse_gputrace.py) | Xcode GUI |
-|-----------|------------------------|-----------|
-| Read buffer contents at index | ✅ | ✅ |
-| Read texture pixel data | ✅ (if MTLTexture files present) | ✅ |
-| List resources with labels | ✅ | ✅ |
-| List shader function names | ✅ | ✅ |
-| Buffer statistics (min/max/mean) | ✅ | ❌ (manual) |
-| Draw call stepping | ❌ | ✅ |
-| Pixel history | ❌ | ✅ |
-| Shader step-through | ❌ | ✅ |
-| Pipeline state inspection | ❌ | ✅ |
-| Dependency viewer | ❌ | ✅ |
-| Command buffer replay | ❌ | ✅ |
+| Capability | CLI (programmatic capture) | CLI (Xcode-initiated capture) | Xcode GUI |
+|-----------|---------------------------|------------------------------|-----------|
+| List resources with labels | ✅ | ✅ | ✅ |
+| List shader function names | ✅ | ✅ | ✅ |
+| Read texture/render target data | ✅ (MTLTexture files present) | ✅ | ✅ |
+| Read buffer contents at index | ❌ (no MTLBuffer files) | ✅ | ✅ |
+| Buffer statistics (min/max/mean) | ❌ | ✅ | ❌ (manual) |
+| Draw call stepping | ❌ | ❌ | ✅ |
+| Pixel history | ❌ | ❌ | ✅ |
+| Shader step-through | ❌ | ❌ | ✅ |
+| Pipeline state inspection | ❌ | ❌ | ✅ |
+| Dependency viewer | ❌ | ❌ | ✅ |
+| Command buffer replay | ❌ | ❌ | ✅ |
 
-### Visual Verification (Screenshot Capture)
-
-Claude can capture screenshots of a Metal app's rendered output to visually inspect rendering. This closes the debugging loop — after fixing bugs, Claude captures a screenshot and compares before vs after.
+### Reference: Screenshot capture techniques
 
 #### Method 1: In-app auto-screenshot (Preferred)
 
@@ -798,33 +854,6 @@ if frameCount == 3 && screenshotMode {
 
 **Important**: Set `metalView.framebufferOnly = false` before rendering to allow texture readback.
 
-**Build script integration:**
-
-```bash
-# Add --screenshot mode to your build script
-run_screenshot() {
-    echo "Rendering and saving screenshot..."
-    ./your_app --screenshot
-}
-```
-
-**Before/after workflow with auto-screenshot:**
-
-```bash
-# 1. Screenshot the buggy version
-./build_and_run.sh --screenshot
-# → saves output.png automatically
-
-# 2. Claude reads output.png to diagnose issues
-# 3. Claude fixes bugs in source code
-
-# 4. Rebuild and screenshot the fixed version
-./build_and_run.sh --screenshot
-# → overwrites output.png with fixed output
-
-# 5. Claude reads output.png to verify the fix
-```
-
 #### Method 2: macOS screencapture (Fallback)
 
 If the app doesn't support `--screenshot`, use macOS `screencapture` to capture the window:
@@ -841,20 +870,6 @@ screencapture -w -x /tmp/screenshot.png
 # Stop the app
 kill $APP_PID 2>/dev/null
 ```
-
-Claude can read PNG/JPG images directly, so after capturing a screenshot it can verify:
-- Triangle orientation and position are correct
-- Vertex colors match expected RGB values
-- Background color is correct
-- No visual artifacts or transparency issues
-
-#### When to use screenshots vs .gputrace
-
-| Technique | Use when |
-|-----------|----------|
-| Screenshot | Verifying visual output, comparing before/after, checking layout/colors |
-| .gputrace | Reading exact buffer values, diagnosing data issues, analyzing shader inputs |
-| Both | Full debugging: .gputrace for diagnosis, screenshot for visual verification |
 
 ## 7. Metal Shader Compilation
 
@@ -1005,59 +1020,9 @@ MVK_CONFIG_AUTO_GPU_CAPTURE_OUTPUT_FILE=/tmp/frame.gputrace \
 open /tmp/frame.gputrace
 ```
 
-### Recipe: Inspect buffer data from .gputrace (CLI)
+### Recipe: Debug Metal rendering issues (visual + data)
 
-```bash
-# 1. Ensure labels are set in source code (Claude should inject these)
-#    buffer.label = "My Buffer"
-
-# 2. Capture a frame
-METAL_CAPTURE_ENABLED=1 ./your_app
-
-# 3. List resources and their labels
-python3 parse_gputrace.py capture.gputrace
-
-# 4. Read specific buffer values by label
-python3 parse_gputrace.py capture.gputrace \
-  --buffer "Color Output" --layout float4 --index 100
-
-# 5. Read compound struct (e.g., Particle = 3x float4)
-python3 parse_gputrace.py capture.gputrace \
-  --buffer "Particle" --layout "float4,float4,float4" --index 0-10
-
-# 6. Dump statistics for all buffers
-python3 parse_gputrace.py capture.gputrace --dump-all
-```
-
-### Recipe: Visual debugging with screenshots
-
-```bash
-# 1. Build and screenshot the buggy version (auto-saves output.png)
-./build_and_run.sh --screenshot
-cp output.png before.png
-
-# 2. Capture .gputrace for data analysis
-./build_and_run.sh --capture
-python3 parse_gputrace.py capture.gputrace
-
-# 3. Claude reads output.png + source code, diagnoses bugs, applies fixes
-# ... edit shaders and Swift files ...
-
-# 4. Rebuild and screenshot the fixed version
-./build_and_run.sh --screenshot
-cp output.png after.png
-
-# 5. Claude reads output.png to verify the fix
-```
-
-If the app doesn't have `--screenshot` mode, fall back to `screencapture`:
-
-```bash
-./your_app &
-sleep 1
-screencapture -w -x output.png
-kill %1 2>/dev/null
-```
+Use the **Autonomous Metal Debugging Workflow** in Section 6. It covers screenshot capture, .gputrace analysis, source code reading, shader compilation, and the fix/verify loop — with fallbacks when buffer data is unavailable.
 
 ### Recipe: Compare performance before/after a change
 
@@ -1106,8 +1071,8 @@ Metal System Traces can be very large. Follow these rules:
 | Shader compilation | ✅ xcrun metal | N/A (different workflow) |
 | Validation errors | ✅ env vars + log stream | ✅ API validation layer |
 | Performance HUD | ✅ MTL_HUD_ENABLED | N/A |
-| Buffer inspection (CLI) | ✅ parse_gputrace.py + labels | ✅ rdc buffer |
-| Buffer statistics | ✅ --dump-all (min/max/mean) | ❌ |
+| Buffer inspection (CLI) | ⚠️ Xcode-initiated captures only | ✅ rdc buffer |
+| Buffer statistics | ⚠️ Xcode-initiated captures only | ❌ |
 | Draw call inspection | ❌ Xcode only | ✅ rdc draws/pipeline |
 | Pixel history | ❌ Xcode only | ✅ rdc pixel |
 | Shader step-through | ❌ Xcode only | ✅ rdc debug pixel |
