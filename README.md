@@ -4,6 +4,8 @@ A [Claude Code skill](https://docs.anthropic.com/en/docs/claude-code/skills) for
 
 This is the Metal counterpart to [renderdoc-skill](https://github.com/rudybear/renderdoc-skill). While renderdoc-skill provides GPU debugging for Vulkan/D3D/GL via RenderDoc's `rdc-cli`, metal-ai-skill provides GPU profiling, validation, and shader analysis for Metal apps on macOS via Apple's native toolchain.
 
+[![Watch the demo](https://img.youtube.com/vi/ov_v3b5gNCE/maxresdefault.jpg)](https://www.youtube.com/watch?v=ov_v3b5gNCE)
+
 ## What It Does
 
 Teaches Claude Code how to:
@@ -172,8 +174,6 @@ python3 parse_gputrace.py capture.gputrace --buffer "Color Output" --layout floa
 ```
 
 ## Visual Demo
-
-[![Watch the demo](https://img.youtube.com/vi/ov_v3b5gNCE/maxresdefault.jpg)](https://www.youtube.com/watch?v=ov_v3b5gNCE)
 
 The `examples/visual-demo/` contains a broken Metal cube renderer with **4 intentional bugs** that produce visibly wrong output. It demonstrates Claude Code's autonomous debugging workflow — screenshot, .gputrace capture, shader compilation, source code analysis, and fix/verify loop.
 
