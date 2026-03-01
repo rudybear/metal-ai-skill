@@ -12,15 +12,17 @@ let HEIGHT = 512
 
 // --- Vertex Data ---
 
+// Packed vertex layout: float2 position + float4 color = 24 bytes, no padding
 struct Vertex {
-    var position: SIMD2<Float>
-    var color: SIMD4<Float>
+    var px: Float; var py: Float           // position
+    var cr: Float; var cg: Float           // color
+    var cb: Float; var ca: Float
 }
 
 let vertices: [Vertex] = [
-    Vertex(position: SIMD2<Float>(0.9, 0.8),   color: SIMD4<Float>(1, 0, 0, 1)),  // RED
-    Vertex(position: SIMD2<Float>(-0.8, -0.8),  color: SIMD4<Float>(0, 1, 0, 1)),  // GREEN
-    Vertex(position: SIMD2<Float>(0.8, -0.8),   color: SIMD4<Float>(0, 0, 1, 1)),  // BLUE
+    Vertex(px: 0.9, py: 0.8,   cr: 1, cg: 0, cb: 0, ca: 1),  // RED
+    Vertex(px: -0.8, py: -0.8, cr: 0, cg: 1, cb: 0, ca: 1),  // GREEN
+    Vertex(px: 0.8, py: -0.8,  cr: 0, cg: 0, cb: 1, ca: 1),  // BLUE
 ]
 
 // --- Metal Setup ---
@@ -60,12 +62,12 @@ let vertexDescriptor = MTLVertexDescriptor()
 vertexDescriptor.attributes[0].format = .float2
 vertexDescriptor.attributes[0].offset = 0
 vertexDescriptor.attributes[0].bufferIndex = 0
-// color: float4 at offset 8
+// color: float4 at offset 8 (right after float2 position)
 vertexDescriptor.attributes[1].format = .float4
-vertexDescriptor.attributes[1].offset = MemoryLayout<SIMD2<Float>>.stride
+vertexDescriptor.attributes[1].offset = 8
 vertexDescriptor.attributes[1].bufferIndex = 0
-// stride
-vertexDescriptor.layouts[0].stride = MemoryLayout<Vertex>.stride
+// stride: 6 floats = 24 bytes
+vertexDescriptor.layouts[0].stride = 24
 
 let pipelineDesc = MTLRenderPipelineDescriptor()
 pipelineDesc.vertexFunction = vertFunc
@@ -86,7 +88,7 @@ do {
 var vertexData = vertices
 let vertexBuffer = device.makeBuffer(
     bytes: &vertexData,
-    length: MemoryLayout<Vertex>.stride * vertices.count,
+    length: 24 * vertices.count,
     options: .storageModeShared
 )!
 vertexBuffer.label = "Triangle Vertices"
