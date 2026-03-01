@@ -2,8 +2,8 @@
 # build_and_run.sh — Build and run the visual demo
 #
 # Usage:
-#   ./build_and_run.sh              # Build and run (saves output.png)
-#   ./build_and_run.sh --capture    # Build, run with .gputrace capture, analyze
+#   ./build_and_run.sh              # Build and run (opens window)
+#   ./build_and_run.sh --capture    # Build, capture .gputrace, analyze
 #   ./build_and_run.sh --clean      # Remove build artifacts
 
 set -e
@@ -16,7 +16,7 @@ build() {
     xcrun -sdk macosx metallib Shaders.air -o Shaders.metallib
 
     echo "Compiling Swift..."
-    swiftc -framework Metal -framework CoreGraphics -framework ImageIO main.swift -o visual_demo
+    swiftc -framework Cocoa -framework Metal -framework MetalKit main.swift -o visual_demo
 
     echo "Build complete."
 }
@@ -24,25 +24,16 @@ build() {
 run_normal() {
     echo ""
     echo "Running visual_demo..."
-    echo "================================"
     ./visual_demo
-    echo "================================"
-    echo ""
-    if [ -f output.png ]; then
-        echo "Output: output.png ($(stat -f%z output.png) bytes)"
-        echo "Open: open output.png"
-    fi
 }
 
 run_capture() {
     echo ""
     echo "Running with GPU capture..."
-    echo "================================"
-    METAL_CAPTURE_ENABLED=1 ./visual_demo
-    echo "================================"
-    echo ""
+    METAL_CAPTURE_ENABLED=1 ./visual_demo --capture
 
     if [ -d capture.gputrace ]; then
+        echo ""
         echo "Analyzing capture..."
         python3 ../../parse_gputrace.py capture.gputrace
         echo ""
@@ -54,7 +45,7 @@ run_capture() {
 }
 
 clean() {
-    rm -f Shaders.air Shaders.metallib visual_demo output.png
+    rm -f Shaders.air Shaders.metallib visual_demo
     rm -rf capture.gputrace
     echo "Clean."
 }
@@ -69,7 +60,7 @@ case "${1:-}" in
         ;;
     --help|-h)
         echo "Usage: $0 [--capture|--clean]"
-        echo "  (no args)    Build and run (saves output.png)"
+        echo "  (no args)    Build and run (opens window)"
         echo "  --capture    Build, capture .gputrace, analyze"
         echo "  --clean      Remove build artifacts"
         ;;
