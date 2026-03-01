@@ -188,7 +188,7 @@ python3 ../../parse_gputrace.py capture.gputrace
 
 **After (fixed)** — centered triangle with R/G/B vertices on dark gray:
 
-The triangle should show RED at top, GREEN at bottom-left, BLUE at bottom-right on a dark gray background, fully opaque.
+![After — fixed output](examples/visual-demo/after.png)
 
 See also `examples/buggy-renderer/` for a more complex 10-bug compute shader demo.
 
