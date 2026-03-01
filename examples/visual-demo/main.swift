@@ -1,20 +1,4 @@
 // main.swift — Headless Metal renderer that draws a colored triangle to PNG
-//
-// Renders to an offscreen texture, reads pixels back, saves as output.png.
-// Contains INTENTIONAL BUGS for Claude Code to find via .gputrace analysis.
-//
-// BUG 1: Fragment shader swaps R and B channels (Shaders.metal)
-// BUG 2: Vertex shader flips Y (Shaders.metal)
-// BUG 3: Fragment shader sets alpha to 0 (Shaders.metal)
-// BUG 4: Vertex data has wrong position for top vertex (this file)
-// BUG 5: Render pass clear color is black instead of dark gray (this file)
-//
-// Build & run:
-//   xcrun -sdk macosx metal -c Shaders.metal -o Shaders.air
-//   xcrun -sdk macosx metallib Shaders.air -o Shaders.metallib
-//   swiftc -framework Metal -framework CoreGraphics -framework ImageIO main.swift -o visual_demo
-//   ./visual_demo                              # Normal run
-//   METAL_CAPTURE_ENABLED=1 ./visual_demo      # With .gputrace capture
 
 import Foundation
 import Metal
@@ -33,11 +17,8 @@ struct Vertex {
     var color: SIMD4<Float>
 }
 
-// A centered triangle with red/green/blue vertex colors
-// Correct positions: top=(0, 0.8), bottom-left=(-0.8, -0.8), bottom-right=(0.8, -0.8)
 let vertices: [Vertex] = [
-    // BUG 4: Top vertex X is 0.9 instead of 0.0 — triangle is lopsided/degenerate
-    Vertex(position: SIMD2<Float>(0.9, 0.8),   color: SIMD4<Float>(1, 0, 0, 1)),  // Should be (0.0, 0.8) — RED
+    Vertex(position: SIMD2<Float>(0.9, 0.8),   color: SIMD4<Float>(1, 0, 0, 1)),  // RED
     Vertex(position: SIMD2<Float>(-0.8, -0.8),  color: SIMD4<Float>(0, 1, 0, 1)),  // GREEN
     Vertex(position: SIMD2<Float>(0.8, -0.8),   color: SIMD4<Float>(0, 0, 1, 1)),  // BLUE
 ]
@@ -154,8 +135,6 @@ renderPassDesc.colorAttachments[0].texture = renderTarget
 renderPassDesc.colorAttachments[0].loadAction = .clear
 renderPassDesc.colorAttachments[0].storeAction = .store
 
-// BUG 5: Clear color is pure black (0,0,0,1) — should be dark gray (0.15, 0.15, 0.15, 1)
-// Makes it hard to distinguish the triangle from the background when alpha is broken
 renderPassDesc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
 
 guard let commandBuffer = commandQueue.makeCommandBuffer() else {
